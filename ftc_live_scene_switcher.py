@@ -359,6 +359,7 @@ class Switcher:
         self.scheduled = []         # [due_ms_local, trigger, field]
         self.reveal = None          # [due_ms_local, [triggers], field]
         self.delayed = None         # [due_ms_local, scene, reason]: a rule's delayed switch
+        self.match_fields = {}      # match name -> field it ran on (results don't say)
         self.stopped_ts = float("-inf")
 
     # -- settings --
@@ -458,6 +459,14 @@ class Switcher:
                 field = f
                 break
         name = p.get("matchName") or (f"match {p['number']}" if p.get("number") is not None else "")
+        # Results messages carry no field: use the field that match was shown or started on.
+        if name:
+            if field:
+                self.match_fields[name] = field
+                if len(self.match_fields) > 300:
+                    self.match_fields = dict(list(self.match_fields.items())[-150:])
+            else:
+                field = self.match_fields.get(name, 0)
         news = not cmd.get("init")
         ts = cmd.get("ts") or 0
 
@@ -533,10 +542,12 @@ class Switcher:
 
     def fire(self, trig, field):
         rule = self.rule_for(trig, field)
-        if not rule:
-            return False
-        where = f" (field {field})" if field else ""
+        where = f" (field {field})" if field else " (no field)"
         reason = f"{TRIGGER_LABELS.get(trig, trig)}{where}"
+        if not rule:
+            if any(r["trigger"] == trig and r["scene"] for r in self.rules):
+                log(f"FTC Live: {reason}: no rule matches this field, nothing switched")
+            return False
         # a newer trigger replaces a delayed switch that hasn't happened yet
         if self.delayed:
             log(f"FTC Live: {reason} replaced the waiting switch to {self.delayed[1]}")
