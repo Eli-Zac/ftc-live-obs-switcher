@@ -56,7 +56,17 @@ TRIGGERS = [
     ("tie",         "Results shown - tie"),
     ("award",       "Award presented"),
     ("selection",   "Alliance selection"),
+    ("message",     "Message posted"),
 ]
+
+# display commands this handles, or deliberately ignores (as seen on FTC Live v8.0.3)
+KNOWN_COMMANDS = {"MATCH_TIMING", "SHOW_PREVIEW", "SHOW_MATCH", "START_MATCH", "ABORT_MATCH", "CANCEL_MATCH",
+                  "SHOW_RESULTS", "SHOW_AWARD", "SHOW_SELECTION", "SHOW_MESSAGE",
+                  "SHOW_SETUP", "SCORE_UPDATE", "TIMEOUT_UPDATE", "PIT_UPDATE", "PLAY_VIDEO", "SHOW_VIDEO",
+                  "SHOW_KEY", "SHOW_RANKINGS", "SHOW_INSPECTION_STATUS", "SHOW_BLANK", "SHOW_SPONSORS",
+                  "SHOW_BRACKET", "SHOW_ROTATING_BRACKET", "SHOW_ADVANCEMENT", "SHOW_MEET_RANKINGS",
+                  "SHOW_ONLINE_RESULTS", "SHOW_ROUND_RESULTS", "SHOW_SAFETY_SECURITY", "SHOW_SLIDESHOW",
+                  "SHOW_STATUS", "SHOW_TIMEOUT", "SHOW_WIFI"}
 TRIGGER_LABELS = dict(TRIGGERS)
 
 MAX_RULES = 20
@@ -360,6 +370,7 @@ class Switcher:
         self.reveal = None          # [due_ms_local, [triggers], field]
         self.delayed = None         # [due_ms_local, scene, reason]: a rule's delayed switch
         self.match_fields = {}      # match name -> field it ran on (results don't say)
+        self.unknown_logged = set() # command types already reported in the log
         self.stopped_ts = float("-inf")
 
     # -- settings --
@@ -502,6 +513,14 @@ class Switcher:
             self.event("award", field, f"award {award.get('name', '')}".strip())
         elif typ == "SHOW_SELECTION" and news:
             self.event("selection", field, "alliance selection")
+        elif typ == "SHOW_MESSAGE" and news:
+            text = p.get("message") if isinstance(p.get("message"), str) else ""
+            self.event("message", field, f"message {text.strip()[:60]!r}" if text.strip() else "message")
+
+        if typ not in KNOWN_COMMANDS and typ not in self.unknown_logged:
+            self.unknown_logged.add(typ)
+            keys = ", ".join(sorted(p.keys())[:8])
+            log(f"FTC Live: display command {typ} (params: {keys or 'none'})")
 
     def event(self, trig, field, text):
         self.last = text

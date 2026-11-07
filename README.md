@@ -49,6 +49,9 @@ A delayed switch is cancelled if another rule fires before it happens, so a late
 | Results shown - any / red wins / blue wins / tie | The scores appear, after the animation |
 | Award presented | An award is put up on the display |
 | Alliance selection | Alliance selection comes up on the display |
+| Message posted | A message is put up on the audience display |
+
+A display command the script doesn't recognise is written to **Script Log** once, with its parameter names.
 
 The in-match phases aren't sent by FTC Live as separate messages. Like FTC Live's own display, the script works them out from the match start time and the event's match timing, after syncing its clock with the server.
 
