@@ -6,23 +6,28 @@ It listens to the same feed FTC Live's audience display uses. That feed needs no
 
 ## Setup
 
-1. Install 64-bit [Python 3](https://www.python.org/downloads/) if it isn't already on the streaming PC.
-2. In OBS: **Tools → Scripts → Python Settings**, and point it at your Python install folder.
+1. Install 64-bit **Python 3.12** (or 3.11) on the streaming PC. Newer versions don't load in current OBS; you can keep them installed alongside.
+   - With the Python install manager: `py install 3.12`, then `py list -f prefix 3.12` prints the folder.
+   - Otherwise use the python.org installer (not the Microsoft Store version).
+2. In OBS: **Tools → Scripts → Python Settings**, select the folder containing `python.exe`, then fully restart OBS. The tab should show "Loaded Python Version: 3.12".
 3. On the **Scripts** tab, click **+** and select [`ftc_live_scene_switcher.py`](ftc_live_scene_switcher.py).
 4. Enter the FTC Live server's IP (e.g. `192.168.1.20`), click **Find events on server**, and pick the event.
 5. Add rules.
 
 ## Rules
 
-Each rule is **When** (a trigger) + **Field** (Any field, or Field 1 to 6) + **Switch to** (a scene). Use **Test** on a rule to switch to its scene straight away.
+Each rule is **When** (a trigger) + **Field** (Any field, or Field 1 to 6) + **Switch to** (a scene) + an optional **Delay** in seconds. Use **Test** on a rule to switch to its scene straight away (the delay is skipped).
 
 A field-specific rule beats an "Any field" rule for the same trigger. For example:
 
-| When | Field | Switch to |
-|---|---|---|
-| Match on screen | Field 1 | Field 1 |
-| Match on screen | Field 2 | Field 2 |
-| Results shown - any | Any field | Results |
+| When | Field | Switch to | Delay |
+|---|---|---|---|
+| Match on screen | Field 1 | Field 1 | 0 |
+| Match on screen | Field 2 | Field 2 | 0 |
+| Match end (buzzer) | Any field | Wide | 3 |
+| Results shown - any | Any field | Results | 0 |
+
+A delayed switch is cancelled if another rule fires before it happens, so a late switch never overwrites a newer one.
 
 ### Triggers
 

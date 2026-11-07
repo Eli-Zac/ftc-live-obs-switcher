@@ -358,6 +358,7 @@ class Switcher:
         self.seen = set()
         self.scheduled = []         # [due_ms_local, trigger, field]
         self.reveal = None          # [due_ms_local, [triggers], field]
+        self.delayed = None         # [due_ms_local, scene, reason]: a rule's delayed switch
         self.stopped_ts = float("-inf")
 
     # -- settings --
@@ -382,6 +383,7 @@ class Switcher:
         self.conn = ("", "")
         self.scheduled = []
         self.reveal = None
+        self.delayed = None
         self.status = "off"
 
     # -- local clock vs server clock --
@@ -428,6 +430,10 @@ class Switcher:
             self.reveal = None
             for trig in trigs:
                 self.fire(trig, field)
+        if self.delayed and self.delayed[0] <= now_ms():
+            _, scene, reason = self.delayed
+            self.delayed = None
+            switch_to(scene, reason)
 
     # -- one message from FTC Live --
     def handle(self, cmd):
@@ -513,24 +519,34 @@ class Switcher:
             self.scheduled.append([t0 + at, trig, field])
 
     # -- switching --
-    def scene_for(self, trig, field):
+    def rule_for(self, trig, field):
         """A rule for this exact field beats an "any field" rule."""
         any_field = None
         for r in self.rules:
             if r["trigger"] != trig or not r["scene"]:
                 continue
             if r["field"] and r["field"] == field:
-                return r["scene"]
+                return r
             if not r["field"] and any_field is None:
-                any_field = r["scene"]
+                any_field = r
         return any_field
 
     def fire(self, trig, field):
-        scene = self.scene_for(trig, field)
-        where = f" (field {field})" if field else ""
-        if not scene:
+        rule = self.rule_for(trig, field)
+        if not rule:
             return False
-        switch_to(scene, f"{TRIGGER_LABELS.get(trig, trig)}{where}")
+        where = f" (field {field})" if field else ""
+        reason = f"{TRIGGER_LABELS.get(trig, trig)}{where}"
+        # a newer trigger replaces a delayed switch that hasn't happened yet
+        if self.delayed:
+            log(f"FTC Live: {reason} replaced the waiting switch to {self.delayed[1]}")
+            self.delayed = None
+        delay = rule.get("delay") or 0
+        if delay > 0:
+            self.delayed = [now_ms() + delay * 1000, rule["scene"], f"{reason}, after {delay:g}s"]
+            log(f"FTC Live: {reason} -> {rule['scene']} in {delay:g}s")
+        else:
+            switch_to(rule["scene"], reason)
         return True
 
 
@@ -562,7 +578,8 @@ _settings = None
 
 def script_description():
     return ("<b>FTC Live Scene Switcher</b><br>Switches the program scene on FTC Live match events. "
-            "Add a rule per trigger, optionally tied to a field. A field rule beats an 'Any field' rule.")
+            "Add a rule per trigger, optionally tied to a field, with an optional delay. A field rule beats an "
+            "'Any field' rule, and a newer trigger cancels a delayed switch that hasn't happened yet.")
 
 
 def read_rules(settings):
@@ -573,6 +590,7 @@ def read_rules(settings):
             "trigger": obs.obs_data_get_string(settings, f"rule{i}_trigger"),
             "field": obs.obs_data_get_int(settings, f"rule{i}_field"),
             "scene": obs.obs_data_get_string(settings, f"rule{i}_scene"),
+            "delay": max(0.0, obs.obs_data_get_double(settings, f"rule{i}_delay")),
         })
     return rules
 
@@ -679,6 +697,7 @@ def script_properties():
         saved = obs.obs_data_get_string(_settings, f"rule{i}_scene") if _settings else ""
         if saved and saved not in scenes:
             obs.obs_property_list_add_string(s, f"{saved} (missing)", saved)
+        obs.obs_properties_add_float(g, f"rule{i}_delay", "Delay (seconds)", 0.0, 600.0, 0.5)
         obs.obs_properties_add_button(g, f"rule{i}_test", "Test (switch now)", _test_rule(i))
         grp = obs.obs_properties_add_group(props, f"rule{i}", f"Rule {i}", obs.OBS_GROUP_NORMAL, g)
         obs.obs_property_set_visible(grp, i <= n)
