@@ -50,6 +50,18 @@ A delayed switch is cancelled if another rule fires before it happens, so a late
 | Award presented | An award is put up on the display |
 | Alliance selection | Alliance selection comes up on the display |
 | Message posted | A message is put up on the audience display |
+| Video screen shown | The scorekeeper puts up the video screen (FTC Live's *Show Video*) |
+| Video starts playing | A video starts playing on the audience display (FTC Live's *Play Video*), 1 s after it's sent, as the display does |
+| Video finished | That video has ended and the display has gone blank (see below) |
+
+FTC Live doesn't send anything when a video ends, so for **Video finished** the script reads the video's length from the file on the FTC Live server (just its header) and fires 1 s after it ends, when the audience display goes blank. It only does this if a rule uses *Video finished*, and only for MP4/MOV videos; if it can't tell the length, it says so in **Script Log** and that video won't fire *Video finished*. If the scorekeeper puts something else on the display first, the video is gone and *Video finished* doesn't fire.
+
+For example, to show the audience display full-screen while a video plays and come back after:
+
+| When | Field | Switch to | Delay |
+| --- | --- | --- | --- |
+| Video starts playing | Any field | Audience Display | 0 |
+| Video finished | Any field | Field 1 (HUD) | 0 |
 
 A display command the script doesn't recognise is written to **Script Log** once, with its parameter names.
 

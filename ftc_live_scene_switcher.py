@@ -57,6 +57,9 @@ TRIGGERS = [
     ("award",       "Award presented"),
     ("selection",   "Alliance selection"),
     ("message",     "Message posted"),
+    ("videoScreen", "Video screen shown"),
+    ("video",       "Video starts playing"),
+    ("videoEnd",    "Video finished"),
 ]
 
 # display commands this handles, or deliberately ignores (as seen on FTC Live v8.0.3)
@@ -78,6 +81,12 @@ PING_S = 10.0
 SILENCE_S = 25.0
 LATE_MS = 1500        # a period that began this recently still fires
 REVEAL_MS = 4000      # results video length + fade, as measured for the DMX controller
+VIDEO_START_MS = 1000 # FTC Live's display starts a PLAY_VIDEO video 1 s after the command's ts...
+VIDEO_AFTER_MS = 1000 # ...and goes blank 1 s after the video ends
+
+# display commands that only update the screen that's up; anything else replaces it (so a playing
+# video is gone and won't "finish")
+UPDATE_ONLY = {"MATCH_TIMING", "SCORE_UPDATE", "TIMEOUT_UPDATE", "PIT_UPDATE", "SET_CONFIG"}
 
 # FTC Live's own fallback when no MATCH_TIMING has arrived
 DEFAULT_TIMING = {"countdown": 3000, "auto": 30000, "transition": 8000, "teleop": 120000,
@@ -349,6 +358,76 @@ class FeedThread(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
+# How long a video is (its own thread; FTC Live doesn't say when a video ends)
+
+def _mp4_seconds(data):
+    """Duration from an MP4/MOV 'moov' box's 'mvhd', or None."""
+    i = data.find(b"mvhd")
+    if i < 4 or len(data) < i + 24:
+        return None
+    version = data[i + 4]
+    if version == 1:
+        if len(data) < i + 36:
+            return None
+        timescale, duration = struct.unpack("!IQ", data[i + 24:i + 36])
+    else:
+        timescale, duration = struct.unpack("!II", data[i + 16:i + 24])
+    return duration / timescale if timescale else None
+
+
+def _get(url, start, length, timeout=5):
+    """Bytes start..start+length-1 of url, and the file's total size if the server says."""
+    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{start + length - 1}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        total = None
+        cr = r.headers.get("Content-Range") or ""
+        if "/" in cr and cr.rsplit("/", 1)[1].isdigit():
+            total = int(cr.rsplit("/", 1)[1])
+        if r.status == 206:
+            return r.read(length), total
+        # no range support: the whole file comes back; read up to what we need
+        total = int(r.headers.get("Content-Length") or 0) or None
+        data = r.read(start + length)
+        return data[start:start + length], total
+
+
+def video_seconds(url):
+    """The length of an MP4/MOV video at url, reading only its header boxes. None if it can't tell."""
+    head, total = _get(url, 0, 65536)
+    pos = 0
+    while pos + 8 <= len(head):                      # walk the top-level boxes to find 'moov'
+        size, kind = struct.unpack("!I4s", head[pos:pos + 8])
+        if size == 1 and pos + 16 <= len(head):
+            size = struct.unpack("!Q", head[pos + 8:pos + 16])[0]
+        if size < 8:
+            break
+        if kind == b"moov":
+            box = head[pos:pos + size] if pos + size <= len(head) else _get(url, pos, min(size, 4 << 20))[0]
+            return _mp4_seconds(box)
+        if pos + size > len(head):                    # 'moov' is further on (e.g. after the video data)
+            if total and pos + size < total:
+                nxt, _ = _get(url, pos + size, 16)
+                if len(nxt) >= 8 and nxt[4:8] == b"moov":
+                    msize = struct.unpack("!I", nxt[:4])[0]
+                    return _mp4_seconds(_get(url, pos + size, min(msize, 4 << 20))[0])
+            break
+        pos += size
+    if total and total > 65536:                       # last try: 'moov' at the very end
+        tail, _ = _get(url, max(0, total - (4 << 20)), 4 << 20)
+        return _mp4_seconds(tail)
+    return None
+
+
+def probe_video(url, key, out):
+    try:
+        secs = video_seconds(url)
+        err = "not an MP4/MOV file" if secs is None else ""
+    except Exception as e:  # noqa: BLE001 - any failure: we just won't know when it ends
+        secs, err = None, str(e)
+    out.put(("videoLength", key, secs, err))
+
+
+# ---------------------------------------------------------------------------
 # The OBS side (runs on OBS's timer)
 
 class Switcher:
@@ -370,6 +449,7 @@ class Switcher:
         self.reveal = None          # [due_ms_local, [triggers], field]
         self.delayed = None         # [due_ms_local, scene, reason]: a rule's delayed switch
         self.match_fields = {}      # match name -> field it ran on (results don't say)
+        self.video = None           # the video playing on the audience display (see play_video)
         self.unknown_logged = set() # command types already reported in the log
         self.stopped_ts = float("-inf")
 
@@ -396,6 +476,7 @@ class Switcher:
         self.scheduled = []
         self.reveal = None
         self.delayed = None
+        self.video = None
         self.status = "off"
 
     # -- local clock vs server clock --
@@ -422,6 +503,8 @@ class Switcher:
                         log(f"FTC Live: {self.conn[0]} closed the link; is the event code {self.conn[1].upper()} right?")
             elif kind == "offset":
                 self.offset = item[1]
+            elif kind == "videoLength":
+                self.video_length(*item[1:])
             elif kind == "msg":
                 if self.problem != "ok":
                     self.problem = "ok"
@@ -442,6 +525,14 @@ class Switcher:
             self.reveal = None
             for trig in trigs:
                 self.fire(trig, field)
+        v = self.video
+        if v and v["start"] is not None and v["start"] <= t:
+            v["start"] = None
+            self.fire("video", v["field"])
+        if v and v["start"] is None and v["end"] is not None and v["end"] <= t:
+            self.video = None
+            self.last = f"video {v['name']} finished"
+            self.fire("videoEnd", v["field"])
         if self.delayed and self.delayed[0] <= now_ms():
             _, scene, reason = self.delayed
             self.delayed = None
@@ -480,6 +571,11 @@ class Switcher:
                 field = self.match_fields.get(name, 0)
         news = not cmd.get("init")
         ts = cmd.get("ts") or 0
+        # a new screen replaces a playing video: it won't "finish" on the audience display
+        if self.video and typ not in UPDATE_ONLY and news:
+            if self.video["start"] is None:
+                log(f"FTC Live: video {self.video['name']} was replaced by {typ} before it finished")
+            self.video = None
 
         if typ == "SHOW_PREVIEW" and news:
             self.event("preview", field, f"{name} preview")
@@ -513,6 +609,10 @@ class Switcher:
             self.event("award", field, f"award {award.get('name', '')}".strip())
         elif typ == "SHOW_SELECTION" and news:
             self.event("selection", field, "alliance selection")
+        elif typ == "SHOW_VIDEO" and news:
+            self.event("videoScreen", field, "video screen")
+        elif typ == "PLAY_VIDEO" and news:
+            self.play_video(p.get("videoUrl"), field, ts)
         elif typ == "SHOW_MESSAGE" and news:
             text = p.get("message") if isinstance(p.get("message"), str) else ""
             self.event("message", field, f"message {text.strip()[:60]!r}" if text.strip() else "message")
@@ -521,6 +621,30 @@ class Switcher:
             self.unknown_logged.add(typ)
             keys = ", ".join(sorted(p.keys())[:8])
             log(f"FTC Live: display command {typ} (params: {keys or 'none'})")
+
+    # -- a video on the audience display --
+    def play_video(self, url, field, ts):
+        url = str(url or "")
+        name = urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0]) or "video"
+        began = self.local(ts) + VIDEO_START_MS          # when the display starts playing it
+        key = f"{url}@{ts}"
+        self.last = f"video {name}"
+        self.video = {"key": key, "name": name, "field": field, "began": began,
+                      "start": max(began, now_ms()), "end": None}
+        # FTC Live never says when a video ends: read its length from the file itself
+        if url and self.conn[0] and any(r["trigger"] == "videoEnd" and r["scene"] for r in self.rules):
+            full = url if re.match(r"^https?://", url, re.I) else f"http://{self.conn[0]}/{url.lstrip('/')}"
+            threading.Thread(target=probe_video, args=(full, key, self.q), daemon=True).start()
+
+    def video_length(self, key, secs, err):
+        v = self.video
+        if not v or v["key"] != key:
+            return
+        if secs is None:
+            log(f"FTC Live: can't tell how long video {v['name']} is ({err}); 'Video finished' won't fire for it")
+            return
+        v["end"] = v["began"] + secs * 1000 + VIDEO_AFTER_MS
+        log(f"FTC Live: video {v['name']} is {secs:.1f}s long")
 
     def event(self, trig, field, text):
         self.last = text
